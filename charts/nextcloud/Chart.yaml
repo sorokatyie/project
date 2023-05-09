@@ -1,0 +1,7 @@
+apiVersion: v2
+name: nextcloud
+description: Project SA-nextcloud
+type: application
+version: 0.0.16
+appVersion: 0.0.16
+icon: https://icons.iconarchive.com/icons/papirus-team/papirus-apps/256/nextcloud-icon.png

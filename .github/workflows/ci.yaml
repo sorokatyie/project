@@ -1,0 +1,154 @@
+name: Build push image and generate chart 
+on:
+  push:
+    branches:
+      - main
+jobs:
+  bump-ver-push-tag:
+    name: Bump version and push tag 
+    runs-on: ubuntu-latest
+    outputs:
+        tag: ${{ steps.tag_version.outputs.new_tag }}
+    steps:
+      - name: Checkout   
+        uses: actions/checkout@v3
+      
+      - name: Bump version and push tag
+        id: tag_version
+        uses: mathieudutour/github-tag-action@v6.1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          tag_prefix: "" 
+  
+  docker-lint:
+    name: Docker Lint
+    needs: bump-ver-push-tag
+    runs-on: ubuntu-latest
+    steps: 
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Docker Lint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: ./nextcloud/Dockerfile
+          failure-threshold: error  
+
+  build-and-push-image:
+    name: Build and push image 
+    needs: [bump-ver-push-tag, docker-lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      
+      - name: Login to the Container registry
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v3
+        with:
+          context: ./nextcloud
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/nextcloud:${{ needs.bump-ver-push-tag.outputs.tag }}
+  
+  generate-chart:
+    name: Generate Chart
+    needs: bump-ver-push-tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Update appVersion & Chart version
+        run: |
+          sed -i "s/^version:.*$/version: ${{ needs.bump-ver-push-tag.outputs.tag }}/" ./charts/nextcloud/Chart.yaml
+          sed -i "s/^appVersion:.*$/appVersion: ${{ needs.bump-ver-push-tag.outputs.tag }}/" ./charts/nextcloud/Chart.yaml
+
+      - name: Commit changes
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git add .
+          git commit -m "Update Chart to ${{ needs.bump-ver-push-tag.outputs.tag }} by GitHub Actions"
+          git push origin main
+  
+  lint-helm:
+    name: Helm Lint
+    needs: generate-chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install Helm
+        uses: Azure/setup-helm@v3
+        with:
+          version: v3.10.0
+
+      - name: Helm lint
+        run: |
+          helm lint ./charts/nextcloud              
+  
+  chart-release:
+    name: Chart release
+    needs: [bump-ver-push-tag, lint-helm, build-and-push-image]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          ref: 'main'
+          path: 'main'
+
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          ref: 'gh-pages'
+          path: 'gh-pages'
+
+      - name: Install Helm
+        uses: Azure/setup-helm@v3
+        with:
+          version: v3.10.0
+
+      - name: Sync Repo
+        run: cd main && sh package.sh
+
+      - name: Move folder
+        run: |
+          mv main/gh-pages/* gh-pages
+          cd gh-pages
+          helm repo index --url https://tony-by.github.io/nextcloud-ci/ --merge index.yaml .
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git add .
+          git diff --quiet && git diff --staged --quiet || git commit -m "Chart release ${{ needs.bump-ver-push-tag.outputs.tag }}" -m "${{ github.event.head_commit.message }}"       
+          git push
+  
+  slackNotification:
+    name: Slack notofication
+    if: always()
+    needs:
+       - bump-ver-push-tag
+       - docker-lint
+       - build-and-push-image
+       - generate-chart
+       - lint-helm
+       - chart-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Slack Workflow Notification
+        uses: Gamesight/slack-workflow-status@v1.2.0
+        with:
+          # Required Input
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          slack_webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          # Optional Input
+          channel: '#notifications'
+          name: 'Workflow Bot | Nextcloud | Release version: ${{ needs.bump-ver-push-tag.outputs.tag }}'
+          icon_emoji: ':rocket:'
+          icon_url: 'https://github.com/rtCamp.png?size=48'
